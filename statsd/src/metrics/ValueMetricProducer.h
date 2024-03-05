@@ -189,7 +189,7 @@ protected:
     // Internal interface to handle sliced condition change.
     void onSlicedConditionMayChangeLocked(bool overallCondition, const int64_t eventTime) override;
 
-    void dumpStatesLocked(FILE* out, bool verbose) const override;
+    void dumpStatesLocked(int out, bool verbose) const override;
 
     virtual std::string aggregatedValueToString(const AggregatedValue& aggregate) const = 0;
 
@@ -320,7 +320,7 @@ protected:
     const int64_t mMinBucketSizeNs;
 
     // Util function to check whether the specified dimension hits the guardrail.
-    bool hitGuardRailLocked(const MetricDimensionKey& newKey);
+    bool hitGuardRailLocked(const MetricDimensionKey& newKey) const;
 
     bool hasReachedGuardRailLimit() const;
 

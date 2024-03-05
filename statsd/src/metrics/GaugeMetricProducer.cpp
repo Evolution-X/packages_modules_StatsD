@@ -49,6 +49,7 @@ const int FIELD_ID_TIME_BASE = 9;
 const int FIELD_ID_BUCKET_SIZE = 10;
 const int FIELD_ID_DIMENSION_PATH_IN_WHAT = 11;
 const int FIELD_ID_IS_ACTIVE = 14;
+const int FIELD_ID_DIMENSION_GUARDRAIL_HIT = 17;
 // for GaugeMetricDataWrapper
 const int FIELD_ID_DATA = 1;
 const int FIELD_ID_SKIPPED = 2;
@@ -98,7 +99,8 @@ GaugeMetricProducer::GaugeMetricProducer(
                                                       : StatsdStats::kPullMaxDelayNs),
       mDimensionSoftLimit(dimensionSoftLimit),
       mDimensionHardLimit(dimensionHardLimit),
-      mGaugeAtomsPerDimensionLimit(metric.max_num_gauge_atoms_per_bucket()) {
+      mGaugeAtomsPerDimensionLimit(metric.max_num_gauge_atoms_per_bucket()),
+      mDimensionGuardrailHit(false) {
     mCurrentSlicedBucket = std::make_shared<DimToGaugeAtomsMap>();
     mCurrentSlicedBucketForAnomaly = std::make_shared<DimToValMap>();
     int64_t bucketSizeMills = 0;
@@ -216,17 +218,17 @@ optional<InvalidConfigReason> GaugeMetricProducer::onConfigUpdatedLocked(
     return nullopt;
 }
 
-void GaugeMetricProducer::dumpStatesLocked(FILE* out, bool verbose) const {
+void GaugeMetricProducer::dumpStatesLocked(int out, bool verbose) const {
     if (mCurrentSlicedBucket == nullptr ||
         mCurrentSlicedBucket->size() == 0) {
         return;
     }
 
-    fprintf(out, "GaugeMetric %lld dimension size %lu\n", (long long)mMetricId,
+    dprintf(out, "GaugeMetric %lld dimension size %lu\n", (long long)mMetricId,
             (unsigned long)mCurrentSlicedBucket->size());
     if (verbose) {
         for (const auto& it : *mCurrentSlicedBucket) {
-            fprintf(out, "\t(what)%s\t(states)%s  %d atoms\n",
+            dprintf(out, "\t(what)%s\t(states)%s  %d atoms\n",
                     it.first.getDimensionKeyInWhat().toString().c_str(),
                     it.first.getStateValuesKey().toString().c_str(), (int)it.second.size());
         }
@@ -257,6 +259,11 @@ void GaugeMetricProducer::onDumpReportLocked(const int64_t dumpTimeNs,
 
     if (mPastBuckets.empty() && mSkippedBuckets.empty()) {
         return;
+    }
+
+    if (mDimensionGuardrailHit) {
+        protoOutput->write(FIELD_TYPE_BOOL | FIELD_ID_DIMENSION_GUARDRAIL_HIT,
+                           mDimensionGuardrailHit);
     }
 
     protoOutput->write(FIELD_TYPE_INT64 | FIELD_ID_TIME_BASE, (long long)mTimeBaseNs);
@@ -358,6 +365,7 @@ void GaugeMetricProducer::onDumpReportLocked(const int64_t dumpTimeNs,
     if (erase_data) {
         mPastBuckets.clear();
         mSkippedBuckets.clear();
+        mDimensionGuardrailHit = false;
     }
 }
 
@@ -401,10 +409,10 @@ void GaugeMetricProducer::pullAndMatchEventsLocked(const int64_t timestampNs) {
         return;
     }
     for (const auto& data : allData) {
-        LogEvent localCopy = *data;
-        localCopy.setElapsedTimestampNs(timestampNs);
-        if (mEventMatcherWizard->matchLogEvent(localCopy, mWhatMatcherIndex) ==
+        if (mEventMatcherWizard->matchLogEvent(*data, mWhatMatcherIndex) ==
             MatchingState::kMatched) {
+            LogEvent localCopy = *data;
+            localCopy.setElapsedTimestampNs(timestampNs);
             onMatchedLogEventLocked(mWhatMatcherIndex, localCopy);
         }
     }
@@ -505,7 +513,7 @@ bool GaugeMetricProducer::hitGuardRailLocked(const MetricDimensionKey& newKey) {
         return false;
     }
     // 1. Report the tuple count if the tuple count > soft limit
-    if (mCurrentSlicedBucket->size() > mDimensionSoftLimit - 1) {
+    if (mCurrentSlicedBucket->size() >= mDimensionSoftLimit) {
         size_t newTupleCount = mCurrentSlicedBucket->size() + 1;
         StatsdStats::getInstance().noteMetricDimensionSize(mConfigKey, mMetricId, newTupleCount);
         // 2. Don't add more tuples, we are above the allowed threshold. Drop the data.
@@ -515,6 +523,7 @@ bool GaugeMetricProducer::hitGuardRailLocked(const MetricDimensionKey& newKey) {
                       newKey.toString().c_str());
                 mHasHitGuardrail = true;
             }
+            mDimensionGuardrailHit = true;
             StatsdStats::getInstance().noteHardDimensionLimitReached(mMetricId);
             return true;
         }
